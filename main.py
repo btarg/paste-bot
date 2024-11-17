@@ -5,28 +5,14 @@ import os
 import aiohttp
 import json
 
+from config import *
+
 load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="$", intents=intents)
-
-## Minimum number of lines in a code block to be pasted
-CODE_BLOCK_MIN_LINES = 5
-## Max amount of lines before the message is edited
-CODE_BLOCK_MAX_LINES = 15
-## For removing language markers from code blocks
-## We also use this to compare file extensions
-LANGUAGES = [
-    "gdscript", "gd", "tscn", "tres",
-    "json", "csharp", "cs", "cpp",
-    "h", "swift", "rust", "rs",
-    "glsl", "gdshader", "godot",
-    "md", "ini", "bash", "java",
-]
-
-MAX_ATTACHMENTS = 3
+bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 # (message, content, filename)
 upload_queue = []
