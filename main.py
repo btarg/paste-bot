@@ -22,7 +22,6 @@ async def on_ready():
     print(f"We have logged in as {bot.user}")
     await bot.tree.sync()
 
-
 @bot.hybrid_command(name="paste", description="Bring up info about pasting")
 async def paste(ctx):
     embed = discord.Embed(
@@ -46,6 +45,14 @@ async def paste(ctx):
 
     await ctx.send(embed=embed)
 
+# context menu to paste a section of the selected message (start and end point)
+@bot.tree.context_menu(name="Paste Selection")
+async def paste_selection(interaction: discord.Interaction, message: discord.Message):
+    status = await handle_message(message)
+    if not status:
+        await interaction.response.send_message("No code blocks or attachments found", ephemeral=True)
+    else:
+        await interaction.response.send_message("Code blocks and attachments have been pasted", ephemeral=True)
 
 async def upload_paste():
     final_string = ""  # Holds the final response to send
@@ -94,21 +101,16 @@ async def upload_paste():
         # Reply to the message with all URLs
         await message.reply(final_string)
 
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author == bot.user:
-        return
-
+async def handle_message(message: discord.Message):
     if "```" in message.content:
-        
+
         upload_queue.clear()
         code_blocks = []
 
         line_count = len(message.content.split("\n"))
         if line_count < CODE_BLOCK_MIN_LINES:
             print("Not enough lines to paste")
-            return
+            return False
 
         # Split the message by code block markers
         parts = message.content.split("```")
@@ -133,7 +135,6 @@ async def on_message(message: discord.Message):
             # Add the formatted block to the code_blocks list
             code_blocks.append(formatted_block)
 
-
         # Combine the blocks with the specified separation
         if len(code_blocks) > 0:
             combined_code = "\n\n# ...\n\n".join(code_blocks)
@@ -142,7 +143,7 @@ async def on_message(message: discord.Message):
 
             if (block_line_count - 5) < CODE_BLOCK_MIN_LINES:
                 print("Code block is too small to paste")
-                return
+                return False
             upload_queue.append((message, combined_code, f"Code blocks"))
 
     attachment_index = 0
@@ -171,8 +172,17 @@ async def on_message(message: discord.Message):
 
     if len(upload_queue) > 0:
         await upload_paste()
+        return True
 
+    return False
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author == bot.user:
+        return
+
+    await handle_message(message)
     await bot.process_commands(message)
-
 
 bot.run(os.environ["DISCORD_TOKEN"])
