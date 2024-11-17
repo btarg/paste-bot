@@ -1,6 +1,9 @@
 ## Command prefix
 PREFIX="$"
 
+## This is what the bot will report as
+USER_AGENT="PasteBot/1.1"
+
 ## Minimum number of lines in a code block to be pasted
 CODE_BLOCK_MIN_LINES = 5
 ## Max amount of lines before the message is edited
