@@ -16,8 +16,20 @@ bot = commands.Bot(command_prefix="$", intents=intents)
 CODE_BLOCK_MIN_LINES = 5
 ## Max amount of lines before the message is edited
 CODE_BLOCK_MAX_LINES = 15
+## For removing language markers from code blocks
+## We also use this to compare file extensions
+LANGUAGES = [
+    "gdscript", "gd", "tscn", "tres",
+    "json", "csharp", "cs", "cpp",
+    "h", "swift", "rust", "rs",
+    "glsl", "gdshader", "godot",
+    "md", "ini", "bash", "java",
+]
 
-LANGUAGES = ["gdscript", "swift", "tscn", "json", "csharp", "cpp", "java", "rust"]
+MAX_ATTACHMENTS = 3
+
+# (message, content, filename)
+upload_queue = []
 
 @bot.event
 async def on_ready():
@@ -28,19 +40,20 @@ async def on_ready():
 @bot.hybrid_command(name="paste", description="Bring up info about pasting")
 async def paste(ctx):
     embed = discord.Embed(
-        title="Pasting Information",
-        description="""When sharing code with others, it's recommended you use a **pasting service** to share your code.
+        title=":clipboard: Pasting Code",
+        description="""When sharing code with others, it's recommended you use a **pasting service**.
+        Using a pasting service allows you to share code in a clean and readable format, without flooding the chat.
         This bot can help you with that, but you can also use any of the following paste sites directly:""",
         color=discord.Color.from_rgb(83, 164, 224),
     )
     embed.add_field(
-        name="Paste Sites",
+        name=":link: Paste Sites",
         value="- [Pastes.dev](https://pastes.dev)\n- [Pastebin](https://pastebin.com)\n- [Hastebin](https://hastebin.com)\n- [GitHub Gist](https://gist.github.com)",
         inline=False,
     )
     embed.add_field(
         name="How to Use the Bot",
-        value='1. Upload a `.gd` or `.tscn` file as an attachment, or wrap your code in triple backticks (\`\`\`), and include the word **"paste"** in your message.\n2. The bot will automatically upload the content to [pastes.dev](https://pastes.dev) and reply with the link.',
+        value='1. Upload a code file as an attachment, or wrap your code in triple backticks (\`\`\`).\n2. If your code is long enough, the bot will automatically upload the content to [pastes.dev](https://pastes.dev) and reply with the link.',
         inline=False,
     )
     embed.set_footer(text="PasteBot v1.0")
@@ -48,28 +61,53 @@ async def paste(ctx):
     await ctx.send(embed=embed)
 
 
-async def upload_paste(message: discord.Message, content_to_paste: str):
-    # Upload the content to pastes.dev
-    async with aiohttp.ClientSession() as session:
-        headers = {
-            "Content-Type": "text/swift",
-            "User-Agent": "PasteBot/1.0",
-        }
-        try:
-            async with session.post(
-                "https://api.pastes.dev/post",
-                data=content_to_paste,
-                headers=headers,
-            ) as response:
-                if response.status == 201:
-                    response_data = await response.json()
-                    paste_key = response_data.get("key")
-                    paste_url = f"https://pastes.dev/{paste_key}"
-                    await message.reply(f"Paste created: {paste_url}")
-                else:
-                    print(f"Failed to create paste: {response.status}")
-        except Exception as e:
-            print(f"An error occurred: {e}")
+async def upload_paste():
+    final_string = ""  # Holds the final response to send
+
+    # Dictionary to group URLs and filenames by message
+    message_to_urls = {}
+
+    # Process the upload queue
+    for message, content_to_paste, filename in upload_queue:
+        print(f"Uploading paste for message: {message.id}")
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Content-Type": "text/swift",  # Set to appropriate language
+                "User-Agent": "PasteBot/1.0",
+            }
+            try:
+                # Send the paste content to the API
+                async with session.post(
+                    "https://api.pastes.dev/post",
+                    data=content_to_paste,
+                    headers=headers,
+                ) as response:
+                    if response.status == 201:
+                        response_data = await response.json()
+                        paste_key = response_data.get("key")
+                        paste_url = f"https://pastes.dev/{paste_key}"
+
+                        # Group URLs by message, including the filename
+                        if message not in message_to_urls:
+                            message_to_urls[message] = []
+                        message_to_urls[message].append((paste_url, filename))
+
+                    else:
+                        print(f"Failed to create paste: {response.status}")
+            except Exception as e:
+                print(f"An error occurred: {e}")
+
+    # Once all uploads are done, reply with the URLs
+    for message, urls in message_to_urls.items():
+        # Create the response string with filenames
+        combined_urls = "\n".join(
+            [f"`{filename}`: {url}" for url, filename in urls]
+        )
+        final_string = f":clipboard: Pasted **{len(urls)}** file(s):\n{combined_urls}"
+
+        # Reply to the message with all URLs
+        await message.channel.send(final_string)
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -77,9 +115,10 @@ async def on_message(message: discord.Message):
         return
 
     if "```" in message.content:
-        # Initialize the list to store code blocks
-        code_blocks = []
         
+        upload_queue.clear()
+        code_blocks = []
+
         line_count = len(message.content.split("\n"))
         if line_count < CODE_BLOCK_MIN_LINES:
             print("Not enough lines to paste")
@@ -119,27 +158,34 @@ async def on_message(message: discord.Message):
             if (block_line_count - 5) < CODE_BLOCK_MIN_LINES:
                 print("Code block is too small to paste")
                 return
-            await upload_paste(message, combined_code)
+            upload_queue.append((message, combined_code, f"Code blocks"))
+
+    attachment_index = 0
 
     for attachment in message.attachments:
+
+        if attachment_index == MAX_ATTACHMENTS:
+            print("Reached the maximum number of attachments")
+            break
 
         filename = attachment.url.split("/")[-1].split("?")[0]
         print(f"Processing attachment: {filename}")
         print(f"Content type: {attachment.content_type}")
 
-        if not filename.endswith(".gd") and not filename.endswith(".tscn"):
-            continue
+        if filename.split(".")[1] in LANGUAGES:
+            # Extract the content of the file as a string
+            file_bytes = await attachment.read()
+            content_to_paste = file_bytes.decode("utf-8")
 
-        # Extract the content of the file as a string
-        file_bytes = await attachment.read()
-        content_to_paste = file_bytes.decode("utf-8")  # Decode bytes to string
+            if not content_to_paste or len(content_to_paste) < 10:
+                print("Tried to paste an empty or small attachment")
+                continue
 
-        if not content_to_paste or len(content_to_paste) < 10:
-            # The file is empty
-            print("Tried to paste an empty or small attachment")
-            continue
+            upload_queue.append((message, content_to_paste, filename))
+            attachment_index += 1
 
-        await upload_paste(message, content_to_paste)
+    if len(upload_queue) > 0:
+        await upload_paste()
 
     await bot.process_commands(message)
 
