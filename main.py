@@ -106,7 +106,7 @@ async def upload_paste():
         final_string = f":clipboard: Pasted **{len(urls)}** file(s):\n{combined_urls}"
 
         # Reply to the message with all URLs
-        await message.channel.send(final_string)
+        await message.reply(final_string)
 
 
 @bot.event
