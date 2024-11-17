@@ -137,7 +137,6 @@ async def on_message(message: discord.Message):
         # Combine the blocks with the specified separation
         if len(code_blocks) > 0:
             combined_code = "\n\n# ...\n\n".join(code_blocks)
-            print(f"Combined code content:\n{combined_code}")
 
             block_line_count = len(combined_code.split("\n"))
 
