@@ -2,7 +2,7 @@
 PREFIX="$"
 
 ## This is what the bot will report as
-USER_AGENT="PasteBot/1.1"
+USER_AGENT="PasteBot/2.0"
 
 ## Minimum number of lines in a code block to be pasted
 CODE_BLOCK_MIN_LINES = 5

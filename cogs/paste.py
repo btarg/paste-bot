@@ -6,13 +6,13 @@ import os
 # config is 1 level up from the cogs folder
 from config import *
 
-class PastingCog(commands.Cog):
+class Paste(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.upload_queue = []
 
     @commands.hybrid_command(name="paste", description="Bring up info about pasting")
-    async def paste(self, ctx):
+    async def paste_info(self, ctx):
         embed = discord.Embed(
             title=":clipboard: Pasting Code",
             description="""When sharing code with others, it's recommended you use a **pasting service**.
@@ -164,4 +164,4 @@ class PastingCog(commands.Cog):
         return False
 
 async def setup(bot):
-    await bot.add_cog(PastingCog(bot))
+    await bot.add_cog(Paste(bot))
