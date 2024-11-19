@@ -189,7 +189,7 @@ class Bookmarks(commands.Cog):
     
             try:
                 guild = self.bot.get_guild(guild_id)
-                channel = guild.get_channel(channel_id)
+                channel = await guild.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
     
                 embed = discord.Embed(
