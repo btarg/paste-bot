@@ -1,5 +1,7 @@
-# Discord Code Paste Bot
+# PasteBot
 A simple [discord.py](https://discordpy.readthedocs.io/en/stable/) bot that allows you to paste code to [pastes.dev](https://pastes.dev) from Discord.
+
+It also has support for personal cross-server bookmarks using SQLite.
 
 # Setup
 Put your bot token in a file called `.env`:

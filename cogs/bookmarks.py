@@ -1,7 +1,6 @@
 import discord
 from discord.ext import commands
 import sqlite3
-import asyncio
 
 class Bookmarks(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -55,20 +54,23 @@ class Bookmarks(commands.Cog):
             await ctx.reply(f'No bookmarks found for search term `{name}`. :(', ephemeral=True)
             return
 
+        embeds = []
         for row in rows:
             bookmark_id, guild_id, channel_id, message_id, bookmark_name = row
             print(f"Found bookmark: {bookmark_name}")
             print(f"Guild: {guild_id}, Channel: {channel_id}, Message: {message_id}")
 
             try:
-                channel = self.bot.get_channel(int(channel_id))
-                message = await channel.fetch_message(int(message_id))
+                guild = self.bot.get_guild(guild_id)
+                channel = guild.get_channel(channel_id)
+                message = await channel.fetch_message(message_id)
             except Exception as e:
                 print(f"Failed to fetch message: {e}")
-                return
+                continue
 
             embed = discord.Embed(
-                description=message.content, timestamp=message.created_at
+                description=message.content, timestamp=message.created_at,
+                color=message.author.colour
             )
             embed.set_author(
                 name=message.author.display_name + " (click to jump to message!)",
@@ -82,7 +84,13 @@ class Bookmarks(commands.Cog):
             else:
                 embed.set_footer(text=message.guild.name)
 
-            await ctx.reply(embed=embed, view=BookmarkView(self.conn, bookmark_id))
+            embeds.append((bookmark_id, bookmark_name, embed))
+
+        if embeds:
+            paginator = BookmarkPaginator(embeds, self.conn)
+            await paginator.start(ctx)
+        else:
+            await ctx.send('No valid bookmarks found with that name.', ephemeral=True)
 
     async def cog_unload(self):
         self.conn.close()
@@ -115,7 +123,6 @@ class BookmarkModal(discord.ui.Modal, title="Add Bookmark"):
             cursor.execute('INSERT INTO bookmarks (user_id, guild_id, channel_id, message_id, name) VALUES (?, ?, ?, ?, ?)', (self.user_id, self.guild_id, self.channel_id, self.message_id, self.name.value))
             self.conn.commit()
             await interaction.response.send_message(f'Bookmarked message {self.message_id} with name "{self.name.value}"', ephemeral=True)
-        return
 
 class BookmarkView(discord.ui.View):
     def __init__(self, conn, bookmark_id):
@@ -130,6 +137,56 @@ class BookmarkView(discord.ui.View):
         self.conn.commit()
         await interaction.response.send_message('Bookmark deleted.', ephemeral=True)
         await interaction.message.delete()
+
+class BookmarkPaginator(discord.ui.View):
+    def __init__(self, embeds, conn):
+        super().__init__()
+        self.embeds = embeds
+        self.current_page = 0
+        self.conn = conn
+
+    async def start(self, ctx):
+        self.message = await ctx.reply(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+
+    def get_page_content(self):
+        bookmark_name = self.embeds[self.current_page][1]
+        return f":bookmark: **\"{bookmark_name}\"** ({self.current_page + 1}/{len(self.embeds)})"
+
+    async def user_has_permission(self, user):
+        if user.guild_permissions.manage_messages or user.guild_permissions.administrator:
+            return True
+
+        bookmark_id = self.embeds[self.current_page][0]
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT user_id FROM bookmarks WHERE id = ?", (bookmark_id,))
+        result = cursor.fetchone()
+        return result and result[0] == user.id
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.user_has_permission(interaction.user.id):
+            if self.current_page > 0:
+                self.current_page -= 1
+                await self.message.edit(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.user_has_permission(interaction.user):
+            if self.current_page < len(self.embeds) - 1:
+                self.current_page += 1
+                await self.message.edit(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Delete Bookmark", style=discord.ButtonStyle.danger)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if await self.user_has_permission(interaction.user):
+            cursor.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
+            self.conn.commit()
+            await interaction.response.send_message(":white_check_mark: Bookmark deleted.", ephemeral=True)
+            await interaction.message.delete()
+        else:
+            await interaction.response.send_message(":no_entry_sign: You can't delete this bookmark.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(Bookmarks(bot))
