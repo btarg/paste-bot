@@ -1,23 +1,25 @@
 import discord
 from discord.ext import commands
 import sqlite3
+from config import *
 
 class Bookmarks(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.ctx_menu = discord.app_commands.ContextMenu(
-            name='Bookmark message',
+            name="Bookmark message",
             callback=self.bookmark_context_menu,
         )
-        self.bot.tree.add_command(self.ctx_menu) # add the context menu to the tree
+        self.bot.tree.add_command(self.ctx_menu)  # add the context menu to the tree
 
         # connect to database
-        self.conn = sqlite3.connect('bookmarks.db')
+        self.conn = sqlite3.connect("bookmarks.db")
         self.create_table()
 
     def create_table(self):
         cursor = self.conn.cursor()
-        cursor.execute('''
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS bookmarks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -26,74 +28,233 @@ class Bookmarks(commands.Cog):
                 message_id INTEGER NOT NULL,
                 name TEXT NOT NULL
             )
-        ''')
+        """
+        )
         self.conn.commit()
 
-    async def bookmark_context_menu(self, interaction: discord.Interaction, message: discord.Message):
-        modal = BookmarkModal(self.conn, interaction.user.id, message.guild.id, message.channel.id, message.id)
-        await interaction.response.send_modal(modal)
+    async def user_has_permission(
+        self, user: discord.Member, to_check="id", check_value=None
+    ):
 
-    @commands.hybrid_command(name="add_new_bookmark", description="Bookmark a message with a name")
-    async def add_bookmark(self, ctx: commands.Context, guild_id: int, channel_id: int, message_id: int, name: str):
-        user_id = ctx.author.id
+        if hasattr(user, "guild"):
+            if (
+                user.guild_permissions.manage_messages
+                or user.guild_permissions.administrator
+            ):
+                return True
+
+        # Check against user ID by default
+        if check_value is None:
+            check_value = user.id
 
         cursor = self.conn.cursor()
-        cursor.execute('INSERT INTO bookmarks (user_id, guild_id, channel_id, message_id, name) VALUES (?, ?, ?, ?, ?)', (user_id, guild_id, channel_id, message_id, name))
-        self.conn.commit()
+        cursor.execute(
+            f"SELECT user_id FROM bookmarks WHERE {to_check} = ?", (check_value,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            return False
+        return result and result[0] == user.id
 
-        await ctx.send(f'Bookmarked message {message_id} with name "{name}" for user {user_id}', ephemeral=True)
+    async def remove_bookmark_by_message(self, user: discord.Member, message_id: int):
+        try:
+            if await self.user_has_permission(self, user, "message_id", message_id):
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "DELETE FROM bookmarks WHERE message_id = ? AND user_id = ?",
+                    (message_id, user.id),
+                )
+                # check if success
+                if cursor.rowcount == 0:
+                    return False
 
-    @commands.hybrid_command(name="bookmark", description="Search your bookmarks by name", aliases=["search", "bookmarks", "b"])
+                self.conn.commit()
+                return True
+
+        except Exception as e:
+            await interaction.response.send_message(
+                f":no_entry_sign: Failed to delete bookmark: {e}", ephemeral=True
+            )
+            print(f"Failed to delete bookmark: {e}")
+
+        return False
+
+    async def remove_bookmark_by_name(
+        self, interaction: discord.Interaction, bookmark_name: str
+    ):
+        pass
+
+    async def remove_bookmark_by_id(
+        self, interaction: discord.Interaction, bookmark_id: int
+    ):
+        if await Bookmarks.user_has_permission(self, interaction.user, check_value=bookmark_id):
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
+            if cursor.rowcount == 0:
+                return False
+            self.conn.commit()
+            return True
+        return False
+
+    async def bookmark_context_menu(
+        self, interaction: discord.Interaction, message: discord.Message
+    ):
+        if message.author.bot or not message.guild:
+            await interaction.response.send_message(MESSAGE_BOOKMARK_ERROR)
+
+        modal = BookmarkModal(
+            self.conn,
+            interaction.user.id,
+            message.guild.id,
+            message.channel.id,
+            message.id,
+        )
+
+        await interaction.response.send_modal(modal)
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User):
+        if user.bot or not reaction.message.guild:
+            return
+
+        if str(reaction.emoji) == BOOKMARK_REACTION_EMOJI:
+            # we can't send a modal from here, so we just add the bookmark
+            # with message author and timestamp as the name
+            message_id = reaction.message.id
+            name = (
+                f"{reaction.message.author.name} - {reaction.message.created_at}"
+            )
+
+            result = await self.insert_bookmark(
+                user.id,
+                reaction.message.guild.id,
+                reaction.message.channel.id,
+                message_id,
+                name,
+            )
+            if result:
+                await reaction.message.channel.send(
+                    MESSAGE_BOOKMARK_SUCCESS.format(**locals()),
+                    mention_author=False,
+                )
+
+    @commands.Cog.listener()
+    async def on_reaction_remove(self, reaction: discord.Reaction, user: discord.User):
+        if user.bot or not reaction.message.guild:
+            return
+
+        if str(reaction.emoji) == BOOKMARK_REACTION_EMOJI:
+            result = await self.remove_bookmark_by_message(
+                user, reaction.message.id
+            )
+            if result == False:
+                await interaction.response.send_message(
+                    MESSAGE_BOOKMARK_DELETED_ERROR.format(**locals()), ephemeral=True
+                )
+
+    @commands.hybrid_command(name="remove_bookmark", description="Remove a bookmark")
+    async def remove_bookmark_command(self, ctx: commands.Context, bookmark_name: str):
+        if await self.remove_bookmark_by_name(ctx.author, bookmark_name):
+            await ctx.reply(MESSAGE_BOOKMARK_DELETED.format(**locals()), ephemeral=True)
+        else:
+            await ctx.reply(
+                MESSAGE_BOOKMARK_DELETED_ERROR.format(**locals()), ephemeral=True
+            )
+
+    @commands.hybrid_command(
+        name="bookmark",
+        description="Search your bookmarks by name",
+        aliases=["search", "bookmarks", "b"],
+    )
     async def search_bookmarks(self, ctx: commands.Context, name: str):
         user_id = ctx.author.id
         cursor = self.conn.cursor()
-        cursor.execute('SELECT id, guild_id, channel_id, message_id, name FROM bookmarks WHERE user_id = ? AND name LIKE ?', (user_id, f'%{name}%'))
+        cursor.execute(
+            "SELECT id, guild_id, channel_id, message_id, name FROM bookmarks WHERE user_id = ? AND name LIKE ?",
+            (user_id, f"%{name}%"),
+        )
         rows = cursor.fetchall()
-
+    
         if not rows or len(rows) == 0:
-            await ctx.reply(f'No bookmarks found for search term `{name}`. :(', ephemeral=True)
+            await ctx.reply(
+                MESSAGE_BOOKMARK_NOT_FOUND.format(**locals()), ephemeral=True
+            )
             return
-
+    
         embeds = []
         for row in rows:
             bookmark_id, guild_id, channel_id, message_id, bookmark_name = row
             print(f"Found bookmark: {bookmark_name}")
             print(f"Guild: {guild_id}, Channel: {channel_id}, Message: {message_id}")
-
+    
             try:
                 guild = self.bot.get_guild(guild_id)
                 channel = guild.get_channel(channel_id)
                 message = await channel.fetch_message(message_id)
+    
+                embed = discord.Embed(
+                    description=message.content,
+                    timestamp=message.created_at,
+                    color=message.author.colour,
+                )
+                embed.set_author(
+                    name=message.author.display_name + " (click to jump to message!)",
+                    icon_url=message.author.display_avatar.url,
+                    url=message.jump_url,
+                )
+    
+                icon = message.guild.icon
+                if icon:
+                    embed.set_footer(text=message.guild.name, icon_url=icon.url)
+                else:
+                    embed.set_footer(text=message.guild.name)
+    
+                embeds.append((bookmark_id, user_id, embed, bookmark_name))
             except Exception as e:
                 print(f"Failed to fetch message: {e}")
                 continue
-
-            embed = discord.Embed(
-                description=message.content, timestamp=message.created_at,
-                color=message.author.colour
-            )
-            embed.set_author(
-                name=message.author.display_name + " (click to jump to message!)",
-                icon_url=message.author.display_avatar.url,
-                url=message.jump_url,
-            )
-
-            icon = message.guild.icon
-            if icon:
-                embed.set_footer(text=message.guild.name, icon_url=icon.url)
-            else:
-                embed.set_footer(text=message.guild.name)
-
-            embeds.append((bookmark_id, bookmark_name, embed))
-
+    
         if embeds:
             paginator = BookmarkPaginator(embeds, self.conn)
             await paginator.start(ctx)
         else:
-            await ctx.send('No valid bookmarks found with that name.', ephemeral=True)
+            await ctx.reply("No valid bookmarks found with that name.", ephemeral=True)
+
+    async def insert_bookmark(self, user_id, guild_id, channel_id, message_id, name):
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM bookmarks WHERE user_id = ? AND name = ?",
+            (user_id, name),
+        )
+        count = cursor.fetchone()[0]
+        if count > 0:
+            await interaction.response.send_message(
+                MESSAGE_BOOKMARK_EXISTS.format(**locals()),
+                ephemeral=True,
+            )
+
+            return False
+
+        try:
+            cursor.execute(
+                "INSERT INTO bookmarks (user_id, guild_id, channel_id, message_id, name) VALUES (?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    name,
+                ),
+            )
+            self.conn.commit()
+            return True
+        except Exception as e:
+            print(f"Failed to insert bookmark: {e}")
+            return False
 
     async def cog_unload(self):
         self.conn.close()
+
 
 class BookmarkModal(discord.ui.Modal, title="Add Bookmark"):
     def __init__(self, conn, user_id, guild_id, channel_id, message_id):
@@ -109,34 +270,27 @@ class BookmarkModal(discord.ui.Modal, title="Add Bookmark"):
             placeholder="Enter the name for your bookmark",
             required=True,
             max_length=64,
-            min_length=1
+            min_length=1,
         )
         self.add_item(self.name)
 
     async def on_submit(self, interaction: discord.Interaction):
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM bookmarks WHERE user_id = ? AND name = ?', (self.user_id, self.name.value))
-        count = cursor.fetchone()[0]
-        if count > 0:
-            await interaction.response.send_message(f'A bookmark with the name "{self.name.value}" already exists.', ephemeral=True)
-        else:
-            cursor.execute('INSERT INTO bookmarks (user_id, guild_id, channel_id, message_id, name) VALUES (?, ?, ?, ?, ?)', (self.user_id, self.guild_id, self.channel_id, self.message_id, self.name.value))
-            self.conn.commit()
-            await interaction.response.send_message(f'Bookmarked message {self.message_id} with name "{self.name.value}"', ephemeral=True)
+        name = self.name.value
+        message_id = self.message_id
 
-class BookmarkView(discord.ui.View):
-    def __init__(self, conn, bookmark_id):
-        super().__init__()
-        self.conn = conn
-        self.bookmark_id = bookmark_id
+        result = await Bookmarks.insert_bookmark(
+            self.user_id,
+            self.guild_id,
+            self.channel_id,
+            self.message_id,
+            self.name.value,
+        )
+        if result:
+            await interaction.response.send_message(
+                MESSAGE_BOOKMARK_SUCCESS.format(**locals()),
+                ephemeral=True,
+            )
 
-    @discord.ui.button(label='Delete Bookmark', style=discord.ButtonStyle.danger)
-    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cursor = self.conn.cursor()
-        cursor.execute('DELETE FROM bookmarks WHERE id = ?', (self.bookmark_id,))
-        self.conn.commit()
-        await interaction.response.send_message('Bookmark deleted.', ephemeral=True)
-        await interaction.message.delete()
 
 class BookmarkPaginator(discord.ui.View):
     def __init__(self, embeds, conn):
@@ -146,47 +300,71 @@ class BookmarkPaginator(discord.ui.View):
         self.conn = conn
 
     async def start(self, ctx):
-        self.message = await ctx.reply(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+        self.message = await ctx.reply(
+            content=self.get_page_content(),
+            embed=self.embeds[self.current_page][2],
+            view=self,
+        )
 
     def get_page_content(self):
-        bookmark_name = self.embeds[self.current_page][1]
-        return f":bookmark: **\"{bookmark_name}\"** ({self.current_page + 1}/{len(self.embeds)})"
-
-    async def user_has_permission(self, user):
-        if user.guild_permissions.manage_messages or user.guild_permissions.administrator:
-            return True
-
-        bookmark_id = self.embeds[self.current_page][0]
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT user_id FROM bookmarks WHERE id = ?", (bookmark_id,))
-        result = cursor.fetchone()
-        return result and result[0] == user.id
+        # index 3 is bookmark name
+        return f':bookmark: **"{self.embeds[self.current_page][3]}"** ({self.current_page + 1}/{len(self.embeds)})'
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
-    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.user_has_permission(interaction.user.id):
+    async def previous_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id == self.embeds[self.current_page][1]:
             if self.current_page > 0:
                 self.current_page -= 1
-                await self.message.edit(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+                await self.message.edit(
+                    content=self.get_page_content(),
+                    embed=self.embeds[self.current_page][2],
+                    view=self,
+                )
         await interaction.response.defer()
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.user_has_permission(interaction.user):
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id == self.embeds[self.current_page][1]:
             if self.current_page < len(self.embeds) - 1:
                 self.current_page += 1
-                await self.message.edit(content=self.get_page_content(), embed=self.embeds[self.current_page][2], view=self)
+                await self.message.edit(
+                    content=self.get_page_content(),
+                    embed=self.embeds[self.current_page][2],
+                    view=self,
+                )
         await interaction.response.defer()
 
     @discord.ui.button(label="Delete Bookmark", style=discord.ButtonStyle.danger)
-    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if await self.user_has_permission(interaction.user):
-            cursor.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
-            self.conn.commit()
-            await interaction.response.send_message(":white_check_mark: Bookmark deleted.", ephemeral=True)
-            await interaction.message.delete()
-        else:
-            await interaction.response.send_message(":no_entry_sign: You can't delete this bookmark.", ephemeral=True)
+    async def delete_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        bookmark_name = self.embeds[self.current_page][3]
+        if interaction.user.id == self.embeds[self.current_page][1]:
+            if await Bookmarks.remove_bookmark_by_id(
+                self, interaction, self.embeds[self.current_page][0]
+            ):
+                await interaction.response.send_message(
+                    MESSAGE_BOOKMARK_DELETED.format(**locals()), ephemeral=True
+                )
+                # remove the bookmark embed and edit the original message
+                del self.embeds[self.current_page]
+                if self.current_page > 0:
+                    self.current_page -= 1
+                else:
+                    self.current_page = 0
+                await interaction.message.edit(
+                    content=self.get_page_content(),
+                    embed=self.embeds[self.current_page][2],
+                    view=self,)
+            else:
+                await interaction.response.send_message(
+                    MESSAGE_BOOKMARK_DELETED_ERROR.format(**locals()), ephemeral=True
+                )
+
 
 async def setup(bot):
     await bot.add_cog(Bookmarks(bot))
