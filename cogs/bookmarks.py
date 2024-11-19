@@ -64,10 +64,6 @@ class Bookmarks(commands.Cog):
                     "DELETE FROM bookmarks WHERE message_id = ? AND user_id = ?",
                     (message_id, user.id),
                 )
-                # check if success
-                if cursor.rowcount == 0:
-                    return False
-
                 self.conn.commit()
                 return True
 
@@ -126,6 +122,7 @@ class Bookmarks(commands.Cog):
             )
 
             result = await self.insert_bookmark(
+                self,
                 user.id,
                 reaction.message.guild.id,
                 reaction.message.channel.id,
@@ -174,24 +171,18 @@ class Bookmarks(commands.Cog):
             (user_id, f"%{name}%"),
         )
         rows = cursor.fetchall()
-    
-        if not rows or len(rows) == 0:
-            await ctx.reply(
-                MESSAGE_BOOKMARK_NOT_FOUND.format(**locals()), ephemeral=True
-            )
-            return
-    
+
         embeds = []
         for row in rows:
             bookmark_id, guild_id, channel_id, message_id, bookmark_name = row
             print(f"Found bookmark: {bookmark_name}")
             print(f"Guild: {guild_id}, Channel: {channel_id}, Message: {message_id}")
-    
+
             try:
                 guild = self.bot.get_guild(guild_id)
                 channel = await guild.fetch_channel(channel_id)
                 message = await channel.fetch_message(message_id)
-    
+
                 embed = discord.Embed(
                     description=message.content,
                     timestamp=message.created_at,
@@ -202,40 +193,38 @@ class Bookmarks(commands.Cog):
                     icon_url=message.author.display_avatar.url,
                     url=message.jump_url,
                 )
-    
+
                 icon = message.guild.icon
                 if icon:
                     embed.set_footer(text=message.guild.name, icon_url=icon.url)
                 else:
                     embed.set_footer(text=message.guild.name)
-    
+
                 embeds.append((bookmark_id, user_id, embed, bookmark_name))
             except Exception as e:
                 print(f"Failed to fetch message: {e}")
                 continue
-    
+
         if embeds:
             paginator = BookmarkPaginator(embeds, self.conn)
             await paginator.start(ctx)
         else:
-            await ctx.reply("No valid bookmarks found with that name.", ephemeral=True)
+            await ctx.reply(MESSAGE_BOOKMARK_NOT_FOUND.format(**locals()), ephemeral=True)
 
     async def insert_bookmark(self, user_id, guild_id, channel_id, message_id, name):
+        print("Inserting bookmark for user", user_id)
         cursor = self.conn.cursor()
         cursor.execute(
             "SELECT COUNT(*) FROM bookmarks WHERE user_id = ? AND name = ?",
             (user_id, name),
         )
         count = cursor.fetchone()[0]
-        if count > 0:
-            await interaction.response.send_message(
-                MESSAGE_BOOKMARK_EXISTS.format(**locals()),
-                ephemeral=True,
-            )
-
+        print(count)
+        if count or count > 0:
+            print("Bookmark already exists")
             return False
-
         try:
+            print("Inserting bookmark")
             cursor.execute(
                 "INSERT INTO bookmarks (user_id, guild_id, channel_id, message_id, name) VALUES (?, ?, ?, ?, ?)",
                 (
@@ -275,21 +264,24 @@ class BookmarkModal(discord.ui.Modal, title="Add Bookmark"):
         self.add_item(self.name)
 
     async def on_submit(self, interaction: discord.Interaction):
+        print("Submitted modal")
         name = self.name.value
         message_id = self.message_id
 
         result = await Bookmarks.insert_bookmark(
+            self,
             self.user_id,
             self.guild_id,
             self.channel_id,
             self.message_id,
             self.name.value,
         )
-        if result:
-            await interaction.response.send_message(
-                MESSAGE_BOOKMARK_SUCCESS.format(**locals()),
-                ephemeral=True,
-            )
+        response_message = MESSAGE_BOOKMARK_SUCCESS if result else MESSAGE_BOOKMARK_EXISTS
+
+        await interaction.response.send_message(
+            response_message.format(**locals()),
+            ephemeral=True,
+        )
 
 
 class BookmarkPaginator(discord.ui.View):
@@ -310,7 +302,21 @@ class BookmarkPaginator(discord.ui.View):
         # index 3 is bookmark name
         return f':bookmark: **"{self.embeds[self.current_page][3]}"** ({self.current_page + 1}/{len(self.embeds)})'
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.primary)
+    async def first_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        if interaction.user.id == self.embeds[self.current_page][1]:
+            self.current_page = 0
+            await self.message.edit(
+                content=self.get_page_content(),
+                # index 2 is the embed object itself
+                embed=self.embeds[self.current_page][2],
+                view=self,
+            )
+        await interaction.response.defer()
+
+    @discord.ui.button(emoji="⬅️", style=discord.ButtonStyle.primary)
     async def previous_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -319,12 +325,46 @@ class BookmarkPaginator(discord.ui.View):
                 self.current_page -= 1
                 await self.message.edit(
                     content=self.get_page_content(),
+                    # index 2 is the embed object itself
                     embed=self.embeds[self.current_page][2],
                     view=self,
                 )
         await interaction.response.defer()
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="🗑️", style=discord.ButtonStyle.danger)
+    async def delete_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        bookmark_name = self.embeds[self.current_page][3]
+        if await Bookmarks.remove_bookmark_by_id(
+            self, interaction, self.embeds[self.current_page][0]
+        ):
+            await interaction.response.send_message(
+                MESSAGE_BOOKMARK_DELETED.format(**locals()), ephemeral=True
+            )
+            # remove the bookmark embed and edit the original message
+            del self.embeds[self.current_page]
+
+            if len(self.embeds) == 0:
+                await interaction.message.delete()
+                return
+
+            if self.current_page > 0:
+                self.current_page -= 1
+            else:
+                self.current_page = 0
+            await self.message.edit(
+                content=self.get_page_content(),
+                # index 2 is the embed object itself
+                embed=self.embeds[self.current_page][2],
+                view=self,
+            )
+        else:
+            await interaction.response.send_message(
+                MESSAGE_BOOKMARK_DELETED_ERROR.format(**locals()), ephemeral=True
+            )
+
+    @discord.ui.button(emoji="➡️", style=discord.ButtonStyle.primary)
     async def next_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
@@ -333,37 +373,25 @@ class BookmarkPaginator(discord.ui.View):
                 self.current_page += 1
                 await self.message.edit(
                     content=self.get_page_content(),
+                    # index 2 is the embed object itself
                     embed=self.embeds[self.current_page][2],
                     view=self,
                 )
         await interaction.response.defer()
 
-    @discord.ui.button(label="Delete Bookmark", style=discord.ButtonStyle.danger)
-    async def delete_button(
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.primary)
+    async def last_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
-        bookmark_name = self.embeds[self.current_page][3]
         if interaction.user.id == self.embeds[self.current_page][1]:
-            if await Bookmarks.remove_bookmark_by_id(
-                self, interaction, self.embeds[self.current_page][0]
-            ):
-                await interaction.response.send_message(
-                    MESSAGE_BOOKMARK_DELETED.format(**locals()), ephemeral=True
-                )
-                # remove the bookmark embed and edit the original message
-                del self.embeds[self.current_page]
-                if self.current_page > 0:
-                    self.current_page -= 1
-                else:
-                    self.current_page = 0
-                await interaction.message.edit(
+            self.current_page = len(self.embeds) - 1
+            await self.message.edit(
                     content=self.get_page_content(),
+                    # index 2 is the embed object itself
                     embed=self.embeds[self.current_page][2],
-                    view=self,)
-            else:
-                await interaction.response.send_message(
-                    MESSAGE_BOOKMARK_DELETED_ERROR.format(**locals()), ephemeral=True
+                    view=self,
                 )
+        await interaction.response.defer()
 
 
 async def setup(bot):
